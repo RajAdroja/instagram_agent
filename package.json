@@ -1,0 +1,12 @@
+{
+  "name": "instagram-agent",
+  "version": "0.1.0",
+  "description": "Playwright browser automation agent for Instagram stories and direct messages",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.51.0"
+  }
+}
