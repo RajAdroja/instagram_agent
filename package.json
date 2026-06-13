@@ -4,9 +4,16 @@
   "description": "Playwright browser automation agent for Instagram stories and direct messages",
   "type": "module",
   "scripts": {
-    "start": "tsx src/index.ts"
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "dotenv": "^16.4.7",
     "playwright": "^1.51.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
   }
 }
