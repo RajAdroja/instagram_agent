@@ -16,3 +16,16 @@ export interface HudCallbacks {
   onTogglePause: () => boolean;
   onStop: () => void;
 }
+
+export async function setupHud(page: Page, callbacks: HudCallbacks): Promise<void> {
+  try {
+    await page.exposeFunction('__igAgentTogglePause', () => {
+      return callbacks.onTogglePause();
+    });
+    await page.exposeFunction('__igAgentStop', () => {
+      callbacks.onStop();
+    });
+  } catch {
+    // Functions may already be exposed on this page context
+  }
+}
