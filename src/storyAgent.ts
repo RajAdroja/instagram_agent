@@ -208,4 +208,110 @@ export class InstagramStoryAgent {
       await sleep(1500);
     }
   }
+
+  private async openFirstStoryFromTray(page: Page): Promise<boolean> {
+    if (
+      !page.url().startsWith('https://www.instagram.com/') ||
+      page.url().includes('/direct/') ||
+      page.url().includes('/stories/')
+    ) {
+      await page.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded' });
+    }
+    await sleep(2500);
+    await this.dismissCommonPopups(page);
+
+    console.log('[Stories] Looking for stories in home feed tray...');
+    await this.syncHud('running', '', 'Scanning story tray...');
+
+    try {
+      await page.waitForSelector(
+        'button[aria-label*="Story by"], div[role="button"][aria-label*="Story by"], main ul li button, main canvas',
+        { timeout: 8000 },
+      );
+    } catch {
+      // Proceed to evaluate fallback selectors
+    }
+
+    const traySelection = await page.evaluate((includeSeen: boolean) => {
+      document
+        .querySelectorAll('[data-ig-agent-tray-target]')
+        .forEach((el) => el.removeAttribute('data-ig-agent-tray-target'));
+
+      const ariaStoryButtons = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          'button[aria-label*="Story by"], div[role="button"][aria-label*="Story by"], a[aria-label*="Story by"]',
+        ),
+      ).filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 20 && rect.height > 20;
+      });
+
+      if (ariaStoryButtons.length > 0) {
+        const unseenButtons = ariaStoryButtons.filter((el) => {
+          const label = (el.getAttribute('aria-label') || '').toLowerCase();
+          return label.includes('not seen') || !label.includes('seen');
+        });
+
+        const target =
+          unseenButtons[0] || (includeSeen ? ariaStoryButtons[0] : null);
+        if (target) {
+          target.setAttribute('data-ig-agent-tray-target', 'true');
+          return {
+            found: true,
+            description: target.getAttribute('aria-label') || 'Story button',
+          };
+        }
+        return {
+          found: false,
+          reason:
+            'All stories in tray are already marked as seen (run with --include-seen to open seen stories too)',
+        };
+      }
+
+      const mainEl = document.querySelector('main') || document.body;
+      const canvases = Array.from(mainEl.querySelectorAll('canvas'));
+      for (const canvas of canvases) {
+        const clickable = canvas.closest<HTMLElement>('button, [role="button"], a');
+        if (!clickable) continue;
+        const rect = clickable.getBoundingClientRect();
+        if (rect.width < 40 || rect.top > 360) continue;
+
+        const text = (clickable.textContent || '').trim().toLowerCase();
+        if (
+          text === 'your story' ||
+          text.includes('your story') ||
+          text.includes('add to story')
+        ) {
+          continue;
+        }
+
+        clickable.setAttribute('data-ig-agent-tray-target', 'true');
+        return {
+          found: true,
+          description: (clickable.textContent || 'Story tray item').trim(),
+        };
+      }
+
+      return { found: false, reason: 'No story items found in the top tray' };
+    }, this.config.includeSeenStories);
+
+    if (!traySelection.found) {
+      console.log(`[Stories] ${traySelection.reason}`);
+      return false;
+    }
+
+    console.log(`[Stories] Opening story tray: ${traySelection.description}`);
+
+    const targetLocator = page.locator('[data-ig-agent-tray-target="true"]').first();
+    await targetLocator.click({ timeout: 5000 });
+
+    for (let i = 0; i < 16; i++) {
+      if (page.url().includes('/stories/')) {
+        return true;
+      }
+      await sleep(400);
+    }
+
+    return page.url().includes('/stories/');
+  }
 }
