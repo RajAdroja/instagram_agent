@@ -314,4 +314,99 @@ export class InstagramStoryAgent {
 
     return page.url().includes('/stories/');
   }
+
+  private async isCurrentSlideSponsored(page: Page): Promise<boolean> {
+    try {
+      return await page.evaluate(() => {
+        const spans = Array.from(
+          document.querySelectorAll('section span, div[role="dialog"] span'),
+        );
+        return spans.some((el) => {
+          if (el.closest('article')) return false;
+          const text = (el.textContent || '').trim();
+          if (text !== 'Sponsored') return false;
+          const rect = el.getBoundingClientRect();
+          return rect.top >= 0 && rect.top < 220 && rect.width > 10;
+        });
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  private async inspectAndLikeCurrentSlide(
+    page: Page,
+  ): Promise<'liked' | 'already_liked' | 'no_like_button' | 'dry_run_liked'> {
+    const state = await page.evaluate((isDryRun: boolean) => {
+      document
+        .querySelectorAll('[data-ig-agent-like-target]')
+        .forEach((el) => el.removeAttribute('data-ig-agent-like-target'));
+
+      const isStoryElement = (el: Element): boolean => {
+        if (el.closest('article')) return false;
+        const rect = el.getBoundingClientRect();
+        return (
+          rect.width > 8 &&
+          rect.height > 8 &&
+          rect.top > 100 &&
+          rect.bottom <= window.innerHeight &&
+          rect.left >= 0 &&
+          rect.right <= window.innerWidth
+        );
+      };
+
+      const unlikeSvgs = Array.from(
+        document.querySelectorAll('svg[aria-label="Unlike"]'),
+      ).filter(isStoryElement);
+      if (unlikeSvgs.length > 0) {
+        return 'already_liked';
+      }
+
+      const likeSvgs = Array.from(
+        document.querySelectorAll('svg[aria-label="Like"]'),
+      ).filter(isStoryElement);
+      if (likeSvgs.length === 0) {
+        return 'no_like_button';
+      }
+
+      likeSvgs.sort(
+        (a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top,
+      );
+      const targetSvg = likeSvgs[0];
+      const clickable =
+        targetSvg.closest<HTMLElement>('button, [role="button"]') ||
+        targetSvg.parentElement;
+
+      if (!clickable) {
+        return 'no_like_button';
+      }
+
+      clickable.setAttribute('data-ig-agent-like-target', 'true');
+
+      if (isDryRun) {
+        clickable.style.outline = '2px solid #fb7185';
+        clickable.style.borderRadius = '50%';
+        return 'dry_run_liked';
+      }
+
+      return 'can_like';
+    }, this.config.dryRun);
+
+    if (
+      state === 'already_liked' ||
+      state === 'no_like_button' ||
+      state === 'dry_run_liked'
+    ) {
+      return state;
+    }
+
+    try {
+      const likeButton = page.locator('[data-ig-agent-like-target="true"]').first();
+      await likeButton.click({ timeout: 2500 });
+      await sleep(250);
+      return 'liked';
+    } catch {
+      return 'no_like_button';
+    }
+  }
 }
