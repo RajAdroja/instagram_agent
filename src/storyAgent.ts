@@ -2,7 +2,7 @@ import { chromium, type BrowserContext, type Page } from 'playwright';
 import type { AgentConfig } from './config.js';
 import { setupHud, updateHud, type HudState } from './hud.js';
 import type { RunStats } from './types.js';
-import { randomInt, sleep } from './utils.js';
+import { parseStoryUrl, randomInt, sleep } from './utils.js';
 
 export class InstagramStoryAgent {
   private config: AgentConfig;
@@ -407,6 +407,216 @@ export class InstagramStoryAgent {
       return 'liked';
     } catch {
       return 'no_like_button';
+    }
+  }
+
+  private async advanceToNextSlide(page: Page): Promise<boolean> {
+    if (!page.url().includes('/stories/')) {
+      return false;
+    }
+
+    const foundNextButton = await page.evaluate(() => {
+      document
+        .querySelectorAll('[data-ig-agent-next-target]')
+        .forEach((el) => el.removeAttribute('data-ig-agent-next-target'));
+
+      const selectors = [
+        'button[aria-label="Next"]',
+        'div[role="button"][aria-label="Next"]',
+        'svg[aria-label="Next"]',
+        'svg[aria-label="Right chevron"]',
+      ];
+
+      for (const sel of selectors) {
+        const elements = Array.from(document.querySelectorAll(sel)).filter((el) => {
+          if (el.closest('article')) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 6 && rect.height > 6;
+        });
+
+        if (elements.length > 0) {
+          const el = elements[0];
+          const clickable =
+            el.closest<HTMLElement>('button, [role="button"]') ||
+            el.parentElement ||
+            (el as HTMLElement);
+          clickable.setAttribute('data-ig-agent-next-target', 'true');
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (foundNextButton) {
+      try {
+        await page
+          .locator('[data-ig-agent-next-target="true"]')
+          .first()
+          .click({ timeout: 2000 });
+        return true;
+      } catch {
+        // Fall through to keyboard ArrowRight
+      }
+    }
+
+    await page.evaluate(() => {
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
+    });
+    await page.keyboard.press('ArrowRight');
+    return true;
+  }
+
+  private async processStoryTray(page: Page): Promise<void> {
+    const opened = await this.openFirstStoryFromTray(page);
+    if (!opened) {
+      return;
+    }
+
+    let consecutiveStuckCount = 0;
+    let lastSlideKey = '';
+
+    while (!this.isStopped) {
+      await this.waitWhilePaused();
+      if (this.isStopped) break;
+
+      const initialStory = parseStoryUrl(page.url());
+      if (!initialStory) {
+        console.log('\n[Stories] Exited story viewer; all stories in tray processed.');
+        break;
+      }
+
+      if (
+        this.config.maxSlidesPerRun > 0 &&
+        this.stats.slidesViewed >= this.config.maxSlidesPerRun
+      ) {
+        console.log(`\n[Stories] Reached max slides limit (${this.config.maxSlidesPerRun}). Stopping story scan.`);
+        break;
+      }
+
+      if (
+        this.config.maxLikesPerRun > 0 &&
+        this.stats.likedCount >= this.config.maxLikesPerRun
+      ) {
+        console.log(`\n[Stories] Reached max likes limit (${this.config.maxLikesPerRun}). Stopping story scan.`);
+        break;
+      }
+
+      const hudMode = this.config.dryRun ? 'dry_run' : 'running';
+      await this.syncHud(
+        hudMode,
+        `@${initialStory.username}`,
+        `Viewing slide (${initialStory.storyId.slice(0, 8)}...)`,
+      );
+
+      const likeDelay = randomInt(
+        this.config.minLikeDelayMs,
+        this.config.maxLikeDelayMs,
+      );
+      await sleep(likeDelay);
+
+      await this.waitWhilePaused();
+      if (this.isStopped) break;
+
+      const urlAtLikeTime = page.url();
+      const activeStory = parseStoryUrl(urlAtLikeTime);
+      if (!activeStory) {
+        console.log('\n[Stories] Story tray finished.');
+        break;
+      }
+
+      const activeUser = activeStory.username;
+      const slideKey = `${activeUser}/${activeStory.storyId}`;
+      this.stats.slidesViewed++;
+      this.stats.usersVisited.add(activeUser);
+
+      if (this.config.skipUsers.has(activeUser.toLowerCase())) {
+        this.stats.skippedUserSlidesCount++;
+        console.log(`[Skip] [@${activeUser}] Skipped (in skip list)`);
+        await this.syncHud(hudMode, `@${activeUser}`, `Skipped @${activeUser}`);
+      } else if (await this.isCurrentSlideSponsored(page)) {
+        this.stats.skippedAdCount++;
+        console.log(`[Skip] [@${activeUser}] Skipped Sponsored Ad`);
+        await this.syncHud(hudMode, `@${activeUser}`, 'Skipped Sponsored Ad');
+      } else {
+        const result = await this.inspectAndLikeCurrentSlide(page);
+        if (result === 'liked') {
+          this.stats.likedCount++;
+          console.log(
+            `[Liked #${this.stats.likedCount}] Story slide by @${activeUser} (${activeStory.storyId})`,
+          );
+          await this.syncHud(hudMode, `@${activeUser}`, `Liked @${activeUser}'s story`);
+        } else if (result === 'dry_run_liked') {
+          this.stats.likedCount++;
+          console.log(
+            `[DRY RUN #${this.stats.likedCount}] Would like story slide by @${activeUser} (${activeStory.storyId})`,
+          );
+          await this.syncHud(hudMode, `@${activeUser}`, `Dry-run liked @${activeUser}`);
+        } else if (result === 'already_liked') {
+          this.stats.alreadyLikedCount++;
+          console.log(
+            `[Skip] [@${activeUser}] Already liked (${activeStory.storyId})`,
+          );
+          await this.syncHud(hudMode, `@${activeUser}`, `Already liked @${activeUser}`);
+        } else {
+          this.stats.noLikeButtonCount++;
+          console.log(
+            `[Info] [@${activeUser}] No Like button on this slide (${activeStory.storyId})`,
+          );
+          await this.syncHud(hudMode, `@${activeUser}`, 'No Like button on slide');
+        }
+      }
+
+      const nextDelay = randomInt(
+        this.config.minNextDelayMs,
+        this.config.maxNextDelayMs,
+      );
+      await sleep(nextDelay);
+
+      await this.waitWhilePaused();
+      if (this.isStopped) break;
+
+      if (page.url() === urlAtLikeTime) {
+        const advanced = await this.advanceToNextSlide(page);
+        if (!advanced) {
+          break;
+        }
+        await sleep(750);
+      }
+
+      const urlAfterAdvance = page.url();
+      if (!urlAfterAdvance.includes('/stories/')) {
+        console.log('\n[Stories] Reached the end of all stories in the tray.');
+        break;
+      }
+
+      if (urlAfterAdvance === urlAtLikeTime && slideKey === lastSlideKey) {
+        consecutiveStuckCount++;
+        if (consecutiveStuckCount >= 3) {
+          console.log('\n[Stories] Story viewer no longer advancing; reached the end of stories.');
+          break;
+        }
+      } else {
+        consecutiveStuckCount = 0;
+      }
+      lastSlideKey = slideKey;
+    }
+  }
+
+  public async run(): Promise<RunStats> {
+    const page = await this.launchBrowser();
+    this.page = page;
+    try {
+      await this.ensureLoggedIn(page);
+      if (!this.config.loginOnly && !this.isStopped) {
+        await this.processStoryTray(page);
+      }
+      return this.stats;
+    } finally {
+      if (this.context) {
+        await this.context.close().catch(() => {});
+      }
     }
   }
 }
