@@ -2,5 +2,6 @@ node_modules/
 dist/
 .env
 .browser-profile/
+analytics/
 *.log
 .DS_Store
