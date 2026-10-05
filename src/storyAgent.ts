@@ -1,5 +1,7 @@
 import { chromium, type BrowserContext, type Page } from 'playwright';
+import { InstagramChatAnalyticsExtractor } from './chatAnalytics.js';
 import type { AgentConfig } from './config.js';
+import { InstagramDmReactor } from './dmAgent.js';
 import { setupHud, updateHud, type HudState } from './hud.js';
 import type { RunStats } from './types.js';
 import { parseStoryUrl, randomInt, sleep } from './utils.js';
@@ -18,6 +20,11 @@ export class InstagramStoryAgent {
     noLikeButtonCount: 0,
     slidesViewed: 0,
     usersVisited: new Set<string>(),
+    dmThreadsChecked: 0,
+    dmMediaReacted: 0,
+    dmAlreadyReacted: 0,
+    analyticsThreadsExtracted: 0,
+    analyticsMessagesExtracted: 0,
   };
 
   constructor(config: AgentConfig) {
@@ -45,7 +52,7 @@ export class InstagramStoryAgent {
       alreadyLikedCount: this.stats.alreadyLikedCount,
       slidesViewed: this.stats.slidesViewed,
       usersVisited: this.stats.usersVisited.size,
-      dmReactedCount: 0,
+      dmReactedCount: this.stats.dmMediaReacted,
       maxLikes: this.config.maxLikesPerRun,
       lastAction,
     });
@@ -607,11 +614,66 @@ export class InstagramStoryAgent {
   public async run(): Promise<RunStats> {
     const page = await this.launchBrowser();
     this.page = page;
+
+    const sharedHooks = {
+      syncHud: (status: HudState['status'], currentUser: string, lastAction: string) =>
+        this.syncHud(status, currentUser, lastAction),
+      waitWhilePaused: () => this.waitWhilePaused(),
+      isStopped: () => this.isStopped,
+      dismissCommonPopups: (p: Page) => this.dismissCommonPopups(p),
+    };
+
+    const dmReactor = new InstagramDmReactor(this.config, this.stats, sharedHooks);
+    const chatAnalytics = new InstagramChatAnalyticsExtractor(
+      this.config,
+      this.stats,
+      sharedHooks,
+    );
+
     try {
       await this.ensureLoggedIn(page);
-      if (!this.config.loginOnly && !this.isStopped) {
+
+      if (this.config.loginOnly || this.isStopped) {
+        console.log('[Agent] Login-only mode finished. Closing browser...');
+        return this.stats;
+      }
+
+      if (this.config.enableStories && !this.isStopped) {
         await this.processStoryTray(page);
       }
+
+      if (this.config.enableDmReactions && !this.isStopped) {
+        do {
+          await dmReactor.scanAndReactToDmMedia(page);
+          if (!this.config.dmWatchMode || this.isStopped) {
+            break;
+          }
+          console.log(
+            `\n[Watch] Waiting ${this.config.dmWatchIntervalSec}s before checking DMs again (press Ctrl+C or Stop in HUD to exit)...`,
+          );
+          await this.syncHud(
+            this.config.dryRun ? 'dry_run' : 'running',
+            'Watch Mode',
+            `Next DM check in ${this.config.dmWatchIntervalSec}s...`,
+          );
+          for (let s = 0; s < this.config.dmWatchIntervalSec; s++) {
+            if (this.isStopped) break;
+            await this.waitWhilePaused();
+            await sleep(1000);
+          }
+        } while (!this.isStopped);
+      }
+
+      if (this.config.enableChatAnalytics && !this.isStopped) {
+        await chatAnalytics.extractAllChatsAnalytics(page);
+      }
+
+      await this.syncHud(
+        this.isStopped ? 'stopped' : 'completed',
+        '',
+        this.isStopped ? 'Stopped by user' : 'All tasks completed',
+      );
+      await sleep(1500);
       return this.stats;
     } finally {
       if (this.context) {
