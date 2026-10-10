@@ -1,10 +1,16 @@
 {
   "name": "instagram-agent",
-  "version": "0.1.0",
-  "description": "Playwright browser automation agent for Instagram stories and direct messages",
+  "version": "1.2.0",
+  "description": "Playwright browser agent that likes Instagram story slides, reacts to shared Reels and Posts in DMs, and extracts comprehensive chat analytics",
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
+    "stories": "tsx src/index.ts --stories-only",
+    "dm-react": "tsx src/index.ts --dm-only",
+    "watch-dms": "tsx src/index.ts --dm-only --watch",
+    "analytics": "tsx src/index.ts --analytics-only",
+    "dry-run": "tsx src/index.ts --dry-run",
+    "login": "tsx src/index.ts --login-only",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
